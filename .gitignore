@@ -1,0 +1,8 @@
+.venv/
+config.json
+state.json
+probe_out/
+__pycache__/
+wxbot.log*
+history.json
+history.json.tmp

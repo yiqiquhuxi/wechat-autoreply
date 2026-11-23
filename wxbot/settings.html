@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta content="width=device-width, initial-scale=1" name="viewport">
+    <title>微信自动回复</title>
+    <style>
+        :root {
+            --bg: #f5f5f4;
+            --card: #ffffff;
+            --text: #1c1c1a;
+            --muted: #6b6b66;
+            --line: #e4e4e0;
+            --accent: #07a35a;
+            --accent-soft: #e6f6ee;
+            --warn: #b45309;
+            --danger: #c2410c;
+            --input: #fafaf9;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #161615;
+                --card: #1f1f1d;
+                --text: #ededea;
+                --muted: #9a9a94;
+                --line: #33332f;
+                --accent: #34c77b;
+                --accent-soft: #173326;
+                --warn: #f59e0b;
+                --danger: #fb923c;
+                --input: #262624;
+            }
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
+            font: 14px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+        }
+
+        main {
+            max-width: 860px;
+            margin: 0 auto;
+            padding: 24px 16px 80px;
+        }
+
+        header {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        h1 {
+            font-size: 20px;
+            margin: 0;
+            flex: 1;
+        }
+
+        .status {
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            padding: 18px 20px;
+            margin-bottom: 16px;
+        }
+
+        .card h2 {
+            font-size: 15px;
+            margin: 0 0 14px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 14px 18px;
+        }
+
+        label {
+            display: block;
+            font-size: 13px;
+            color: var(--muted);
+            margin-bottom: 4px;
+        }
+
+        input[type=text], input[type=number], input[type=password], input[type=time], select, textarea {
+            width: 100%;
+            padding: 8px 10px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--input);
+            color: var(--text);
+            font: inherit;
+        }
+
+        textarea {
+            min-height: 96px;
+            resize: vertical;
+        }
+
+        .hint {
+            font-size: 12px;
+            color: var(--muted);
+            margin-top: 4px;
+        }
+
+        .row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .row button {
+            white-space: nowrap;
+            flex: none;
+        }
+
+        .check {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            color: var(--text);
+            font-size: 14px;
+        }
+
+        button {
+            font: inherit;
+            padding: 8px 16px;
+            border-radius: 8px;
+            border: 1px solid var(--line);
+            background: var(--card);
+            color: var(--text);
+            cursor: pointer;
+        }
+
+        button.primary {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: #fff;
+        }
+
+        button:disabled {
+            opacity: .5;
+            cursor: default;
+        }
+
+        .switch {
+            position: relative;
+            width: 52px;
+            height: 30px;
+            flex: none;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            inset: 0;
+            background: var(--line);
+            border-radius: 30px;
+            transition: .2s;
+            cursor: pointer;
+        }
+
+        .slider:before {
+            content: "";
+            position: absolute;
+            width: 24px;
+            height: 24px;
+            left: 3px;
+            top: 3px;
+            background: #fff;
+            border-radius: 50%;
+            transition: .2s;
+        }
+
+        .switch input:checked + .slider {
+            background: var(--accent);
+        }
+
+        .switch input:checked + .slider:before {
+            transform: translateX(22px);
+        }
+
+        .seg {
+            display: inline-flex;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .seg button {
+            border: 0;
+            border-radius: 0;
+        }
+
+        .seg button.on {
+            background: var(--accent-soft);
+            color: var(--accent);
+            font-weight: 600;
+        }
+
+        .warn {
+            color: var(--warn);
+            font-size: 13px;
+            margin-top: 8px;
+        }
+
+        .logs {
+            background: var(--input);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 10px 12px;
+            font: 12px/1.6 ui-monospace, Menlo, monospace;
+            height: 260px;
+            overflow: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        .savebar {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: var(--card);
+            border-top: 1px solid var(--line);
+            padding: 10px 16px;
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .toast {
+            color: var(--accent);
+            font-size: 13px;
+        }
+
+        .result {
+            margin-top: 10px;
+            font-size: 13px;
+            padding: 8px 10px;
+            border-radius: 8px;
+            background: var(--input);
+            display: none;
+        }
+
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+<main>
+    <header>
+        <h1>微信自动回复</h1>
+        <span class="status" id="status">连接中…</span>
+        <label class="switch" title="总开关"><input id="enabled" type="checkbox"><span class="slider"></span></label>
+    </header>
+
+    <section class="card">
+        <h2>回复方式</h2>
+        <div class="seg" id="mode">
+            <button data-v="confirm">半自动：弹窗确认后发</button>
+            <button data-v="auto">全自动</button>
+        </div>
+        <div class="hint" style="margin-top:10px">微信只接受真实的前台鼠标和键盘事件（后台投递的点击/滚动它不响应），所以要回消息时
+            微信会短暂切到前台、鼠标会跳一下。程序只在你不碰电脑时才动手，处理完一个会话立刻把前台窗口和鼠标位置还回去。
+        </div>
+        <div class="warn hidden" id="autoWarn">全自动会直接发出去，被风控的概率更高。建议先用半自动跑几天，确认回复质量再切换。</div>
+    </section>
+
+    <section class="card">
+        <h2>回复谁</h2>
+        <div class="grid">
+            <div>
+                <label>私聊白名单（一行一个备注名）</label>
+                <textarea id="wl_private" placeholder="张三&#10;李四"></textarea>
+            </div>
+            <div>
+                <label>群聊白名单（一行一个群名）</label>
+                <textarea id="wl_groups" placeholder="项目群"></textarea>
+            </div>
+        </div>
+        <div class="grid" style="margin-top:14px">
+            <div>
+                <label>我在群里的昵称</label>
+                <input id="my_nickname" placeholder="用来判断有没有人 @我" type="text">
+            </div>
+            <div style="align-self:end">
+                <label class="check"><input id="group_mention" type="checkbox"> 群聊只在有人 @我 时回复</label>
+                <label class="check" style="margin-top:8px"><input id="mention_back" type="checkbox"> 群聊回复时 @ 对方</label>
+                <label class="check" style="margin-top:8px"><input id="quote_reply" type="checkbox"> 回复时引用对方那条消息</label>
+            </div>
+        </div>
+        <div class="grid" style="margin-top:14px">
+            <div>
+                <label>不 @我也回、且一定回复的会话（人和群都行，一行一个名称）</label>
+                <textarea id="wl_always" placeholder="张三&#10;项目群" style="min-height:64px"></textarea>
+                <div class="hint">这里和上面两个白名单互相独立：填在这里的人或群，只要最后一条不是你发的就一定回，
+                    不要求有人 @你，模型判断「不用回」也会补一句。
+                </div>
+            </div>
+        </div>
+        <div class="hint">服务号、订阅号、文件传输助手始终跳过。名称尽量用唯一的备注名，避免认错人。
+            每个会话的聊天记录会存在本机 history.json，用来让回复记住上下文。
+        </div>
+    </section>
+
+    <section class="card">
+        <h2>节奏与限流</h2>
+        <div class="grid">
+            <div><label>每小时最多回复（条）</label><input id="per_hour" min="1" type="number"></div>
+            <div><label>同一会话冷却（秒）</label><input id="cooldown" min="0" type="number"></div>
+            <div>
+                <label>全自动发送前随机等待（秒）</label>
+                <div class="row"><input id="delay_min" min="0" type="number"> <span>~</span> <input id="delay_max" min="0" type="number"></div>
+            </div>
+            <div><label>检查未读间隔（秒）</label><input id="poll" min="5" type="number"></div>
+            <div><label>你离开电脑多久后才动手（秒）</label><input id="idle" min="0" type="number"></div>
+            <div><label>确认弹窗超时（秒）</label><input id="confirm_timeout" min="10" type="number"></div>
+            <div>
+                <label class="check"><input id="quiet_on" type="checkbox"> 免打扰时段</label>
+                <div class="row"><input id="quiet_start" type="time"> <span>~</span> <input id="quiet_end" type="time"></div>
+            </div>
+        </div>
+    </section>
+
+    <section class="card">
+        <h2>模型</h2>
+        <div class="grid">
+            <div>
+                <label>服务商</label>
+                <select id="preset">
+                    <option value="claude">Claude（Anthropic）</option>
+                    <option value="deepseek">DeepSeek</option>
+                    <option value="qwen">通义千问（阿里云百炼）</option>
+                    <option value="kimi">Kimi（Moonshot）</option>
+                    <option value="ollama">本地 Ollama</option>
+                    <option value="custom">其他（兼容 OpenAI 接口）</option>
+                </select>
+            </div>
+            <div>
+                <label>模型名</label>
+                <div class="row">
+                    <input id="model" placeholder="按服务商文档填写" type="text">
+                    <button id="fetchModels" title="从服务商拉取可用模型列表">获取列表</button>
+                </div>
+                <select class="hidden" id="modelPick" style="margin-top:6px"></select>
+                <div class="hint" id="modelHint"></div>
+            </div>
+            <div id="baseUrlBox">
+                <label>接口地址（base_url）</label>
+                <input id="base_url" type="text">
+            </div>
+            <div>
+                <label>API Key</label>
+                <input autocomplete="off" id="api_key" type="password">
+                <div class="hint" id="keyHint"></div>
+            </div>
+            <div id="effortBox">
+                <label>思考力度</label>
+                <select id="effort">
+                    <option value="low">low（聊天够用，快、省）</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                </select>
+            </div>
+        </div>
+        <div style="margin-top:14px">
+            <label>关于我（给模型参考的口吻和背景）</label>
+            <textarea id="persona" placeholder="比如：我是后端开发，说话直接简短，同事叫我老陈。"></textarea>
+        </div>
+        <div class="hint">聊天内容会发给所选服务商生成回复。Key 只保存在本机 config.json（仅本人可读）。</div>
+        <div class="row" style="margin-top:12px">
+            <button id="testBtn">测试一下</button>
+            <button class="hidden" id="clearKey">清除已保存的 Key</button>
+        </div>
+        <div class="result" id="testResult"></div>
+    </section>
+
+    <section class="card">
+        <h2>运行日志 <span class="status" id="sentToday"></span></h2>
+        <div class="logs" id="logs"></div>
+    </section>
+</main>
+
+<div class="savebar">
+    <span class="toast" id="toast"></span>
+    <button class="primary" id="saveBtn">保存设置</button>
+</div>
+
+<script>
+    const TOKEN = "__TOKEN__";
+    const PRESETS = __PRESETS__;
+    const $ = id => document.getElementById(id);
+    const api = (path, body) => fetch(path, {
+        method: body ? "POST" : "GET",
+        headers: {"X-Token": TOKEN, "Content-Type": "application/json"},
+        body: body ? JSON.stringify(body) : undefined,
+    }).then(r => r.json());
+
+    let mode = "confirm";
+    let clearKey = false;
+
+    function setMode(v) {
+        mode = v;
+        document.querySelectorAll("#mode button").forEach(b => b.classList.toggle("on", b.dataset.v === v));
+        $("autoWarn").classList.toggle("hidden", v !== "auto");
+    }
+
+    document.querySelectorAll("#mode button").forEach(b => b.onclick = () => setMode(b.dataset.v));
+
+    function refreshProviderFields() {
+        const p = PRESETS[$("preset").value];
+        const isClaude = p.provider === "anthropic";
+        $("effortBox").classList.toggle("hidden", !isClaude);
+        $("baseUrlBox").classList.toggle("hidden", isClaude);
+    }
+
+    $("preset").onchange = () => {
+        const p = PRESETS[$("preset").value];
+        $("base_url").value = p.base_url;
+        $("model").value = p.model;
+        refreshProviderFields();
+    };
+
+    function fill(c) {
+        setMode(c.mode);
+        $("wl_private").value = c.whitelist.private.join("\n");
+        $("wl_groups").value = c.whitelist.groups.join("\n");
+        $("wl_always").value = (c.always_reply || []).join("\n");
+        $("my_nickname").value = c.my_nickname;
+        $("group_mention").checked = c.group_reply_only_when_mentioned;
+        $("mention_back").checked = c.reply_mention_back !== false;
+        $("quote_reply").checked = c.quote_reply !== false;
+        $("per_hour").value = c.limits.max_replies_per_hour;
+        $("cooldown").value = c.limits.per_chat_cooldown_seconds;
+        $("delay_min").value = c.limits.reply_delay_seconds[0];
+        $("delay_max").value = c.limits.reply_delay_seconds[1];
+        $("poll").value = c.poll_seconds;
+        $("idle").value = c.idle_seconds_required;
+        $("confirm_timeout").value = c.confirm_timeout_seconds;
+        const q = c.quiet_hours || [];
+        $("quiet_on").checked = q.length === 2 && !!q[0];
+        $("quiet_start").value = q[0] || "23:00";
+        $("quiet_end").value = q[1] || "08:00";
+        $("preset").value = c.llm.preset || "custom";
+        $("model").value = c.llm.model;
+        $("base_url").value = c.llm.base_url;
+        $("effort").value = c.llm.effort;
+        $("persona").value = c.llm.persona;
+        $("api_key").value = "";
+        $("api_key").placeholder = c.llm.api_key_hint ? `已保存（${c.llm.api_key_hint}），留空不修改` : "";
+        $("keyHint").textContent = c.llm.api_key_hint ? "" :
+            (c.llm.provider === "anthropic" ? "留空则读取环境变量 ANTHROPIC_API_KEY" : "本地 Ollama 可留空");
+        $("clearKey").classList.toggle("hidden", !c.llm.api_key_hint);
+        clearKey = false;
+        refreshProviderFields();
+    }
+
+    function llmForm() {
+        return {
+            preset: $("preset").value, model: $("model").value, base_url: $("base_url").value,
+            api_key: $("api_key").value, clear_api_key: clearKey, effort: $("effort").value, persona: $("persona").value,
+        };
+    }
+
+    function collect() {
+        return {
+            mode, my_nickname: $("my_nickname").value,
+            whitelist: {private: $("wl_private").value, groups: $("wl_groups").value},
+            group_reply_only_when_mentioned: $("group_mention").checked,
+            reply_mention_back: $("mention_back").checked,
+            quote_reply: $("quote_reply").checked,
+            always_reply: $("wl_always").value,
+            poll_seconds: $("poll").value, idle_seconds_required: $("idle").value,
+            confirm_timeout_seconds: $("confirm_timeout").value,
+            quiet_hours: $("quiet_on").checked ? [$("quiet_start").value, $("quiet_end").value] : [],
+            limits: {
+                max_replies_per_hour: $("per_hour").value, per_chat_cooldown_seconds: $("cooldown").value,
+                reply_delay_seconds: [$("delay_min").value, $("delay_max").value],
+            },
+            llm: llmForm(),
+        };
+    }
+
+    function toast(msg) {
+        $("toast").textContent = msg;
+        setTimeout(() => $("toast").textContent = "", 2500);
+    }
+
+    $("saveBtn").onclick = async () => {
+        fill(await api("/api/config", collect()));
+        toast("已保存，立即生效");
+    };
+    $("clearKey").onclick = () => {
+        clearKey = true;
+        $("api_key").placeholder = "保存后清除";
+        $("clearKey").classList.add("hidden");
+    };
+    $("testBtn").onclick = async () => {
+        const box = $("testResult");
+        box.style.display = "block";
+        box.textContent = "测试中…（模拟对方发来：在吗？明天下午的会改到几点了？）";
+        $("testBtn").disabled = true;
+        try {
+            const r = await api("/api/test-llm", {llm: llmForm()});
+            box.textContent = r.ok ? `模型回复：${r.reply}` : `失败：${r.error}`;
+        } finally {
+            $("testBtn").disabled = false;
+        }
+    };
+    $("fetchModels").onclick = async () => {
+        const hint = $("modelHint"), pick = $("modelPick");
+        hint.textContent = "获取中…";
+        $("fetchModels").disabled = true;
+        pick.classList.add("hidden");
+        try {
+            const r = await api("/api/models", {llm: llmForm()});
+            if (!r.ok) {
+                hint.textContent = `获取失败：${r.error}`;
+                return;
+            }
+            pick.innerHTML = '<option value="">— 从列表里选一个 —</option>';
+            for (const m of r.models) {
+                const o = document.createElement("option");
+                o.value = m;
+                o.textContent = m;
+                pick.appendChild(o);
+            }
+            pick.classList.remove("hidden");
+            pick.value = r.models.includes($("model").value) ? $("model").value : "";
+            hint.textContent = `拉到 ${r.models.length} 个模型，选一个会填进去（也能在上面手动改）`;
+        } finally {
+            $("fetchModels").disabled = false;
+        }
+    };
+    $("modelPick").onchange = e => {
+        if (e.target.value) $("model").value = e.target.value;
+    };
+    $("preset").addEventListener("change", () => {
+        $("modelPick").classList.add("hidden");
+        $("modelHint").textContent = "";
+    });
+    $("enabled").onchange = async e => {
+        await api("/api/enabled", {enabled: e.target.checked});
+        poll();
+    };
+
+    let lastLogLen = -1;
+
+    async function poll() {
+        try {
+            const s = await api("/api/status");
+            $("enabled").checked = s.enabled;
+            $("status").textContent = s.text;
+            $("sentToday").textContent = `今天已发 ${s.sent_today} 条`;
+            if (s.logs.length !== lastLogLen) {
+                const el = $("logs");
+                const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+                el.textContent = s.logs.join("\n") || "暂无日志";
+                if (atBottom) el.scrollTop = el.scrollHeight;
+                lastLogLen = s.logs.length;
+            }
+        } catch {
+            $("status").textContent = "和后台断开了（程序退出了？）";
+        }
+    }
+
+    api("/api/config").then(fill);
+    poll();
+    setInterval(poll, 2000);
+</script>
+</body>
+</html>
