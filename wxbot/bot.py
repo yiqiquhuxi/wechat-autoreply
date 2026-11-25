@@ -49,6 +49,16 @@ _OCR_FIX = str.maketrans({"0": "o", "1": "l", "|": "l", "5": "s", "8": "b"})
 MEDIA_KINDS = ("图片", "视频", "语音", "文件", "动画表情", "表情", "链接", "位置", "名片",
                "小程序", "视频号", "红包", "转账", "音乐", "聊天记录")
 
+_LOG_LINE = re.compile(
+    r"(打开的会话标题|停止本轮操作|暂不回复：|最新一条是我发的|这些消息已处理过|"
+    r"当前屏 未读|当前屏 主动检查|微信不在最前面|没引用成功，直接发|已引用对方那条消息|"
+    r"耗时：打开\+识别)")
+
+
+def looks_like_log(text):
+    """用户把 bot 运行日志贴进聊天时，别把日志当成对话内容喂给模型。"""
+    return bool(_LOG_LINE.search(text or ""))
+
 _SENDER_OK = re.compile(r"^[\w\u4e00-\u9fff·\-.()（） ]{1,24}$")
 
 
@@ -58,10 +68,17 @@ def clean_sender(s):
     return s if _SENDER_OK.match(s) else None
 
 
+_MEDIA_TOKEN = re.compile(r"[\[［]([^\[\]［］]{1,12})[\]］]")
+
+
 def media_kind(text):
-    """会话预览是不是「［图片］」这类媒体占位符；是就返回类型名。"""
-    t = re.sub(r"[\[\]［］\s]", "", text or "").replace("有人@我", "")
-    return t if t in MEDIA_KINDS else None
+    """会话预览里是不是有「［图片］」这类媒体占位符；有就返回类型名。
+    群聊预览常带发送者名字（如「张三: [图片]」），所以按 [] 里的词单独判断。"""
+    for tok in _MEDIA_TOKEN.findall(text or ""):
+        tok = re.sub(r"\s", "", tok).replace("有人@我", "")
+        if tok in MEDIA_KINDS:
+            return tok
+    return None
 
 
 def mentions(text, nick):
@@ -289,6 +306,7 @@ class Bot:
 
     def handle(self, cfg, target, row=None):
         th = cfg["match_threshold"]
+        t_start = time.time()
         if row is not None and not self.dry:
             self.ui.open_row(row)
             self.ui.scroll_chat_to_bottom()  # 会话可能停在上次看到的位置，滚到最新
@@ -297,13 +315,20 @@ class Bot:
             return
         chat = parse_chat(snap[2], self.ui.lay)
         if row is not None and not self.dry and match_name(chat["title"], [target], th) is None:
-            log.debug("第一次点击没打开「%s」（标题「%s」），重试一次", target, chat["title"])
-            self.ui.open_row(row)  # 偶尔点击会被切窗口吃掉，再点一次
-            self.ui.scroll_chat_to_bottom()
+            # 多半只是画面还没渲染完：先等一下再识别一次，比整套重开省 5~8 秒
+            log.debug("第一次点击没打开「%s」（标题「%s」），等一下再识别", target, chat["title"])
+            time.sleep(0.4)
             snap = self.ui.snapshot()
-            if snap is None:
-                return
-            chat = parse_chat(snap[2], self.ui.lay)
+            if snap is not None:
+                chat = parse_chat(snap[2], self.ui.lay)
+            if match_name(chat["title"], [target], th) is None:
+                log.debug("还是没打开「%s」，重新点一次", target)
+                self.ui.open_row(row)  # 偶尔点击会被切窗口吃掉，再点一次
+                self.ui.scroll_chat_to_bottom()
+                snap = self.ui.snapshot()
+                if snap is None:
+                    return
+                chat = parse_chat(snap[2], self.ui.lay)
         # 安全校验：打开后的标题必须还是白名单里的这个人/群，否则放弃
         if match_name(chat["title"], [target], th) is None:
             log.warning("打开的会话标题「%s」和目标「%s」对不上，放弃", chat["title"], target)
@@ -317,7 +342,9 @@ class Bot:
                         "私聊" if kind == "private" else "群", "群聊" if is_group else "私聊")
             return
 
-        msgs = chat["messages"]
+        msgs = [m for m in chat["messages"] if not looks_like_log(m["text"])]
+        if len(msgs) < len(chat["messages"]):
+            log.debug("[%s] 忽略 %d 条像运行日志的消息", target, len(chat["messages"]) - len(msgs))
         last_me = max((i for i, m in enumerate(msgs) if m["me"]), default=-1)
         new_in = [m for m in msgs[last_me + 1:] if not m["me"]]
         media = None
@@ -326,7 +353,7 @@ class Bot:
             # 但会话预览是微信自己写的「［图片］」，说明对方确实发了新消息
             media = media_kind((row or {}).get("preview")) or media_kind(msgs[-1]["text"] if msgs else "")
             if not media:
-                log.info("[%s] 最新一条是我发的，跳过", target)
+                log.debug("[%s] 最新一条是我发的，跳过（预览=%r）", target, (row or {}).get("preview"))
                 return
             log.info("[%s] 对方发的是%s（屏幕上没字，按媒体消息处理）", target, media)
             new_in = [{"text": f"［{media}］", "me": False, "sender": None}]
@@ -353,18 +380,25 @@ class Bot:
             self._defer(target, row, why)
             return
 
+        t_read = time.time()
         self.status.set(f"正在为「{target}」生成回复")
         self.memory.merge(target, msgs)
-        ctx = self.memory.tail(target, cfg["context_messages"]) or msgs[-cfg["context_messages"]:]
+        n_ctx = max(1, int(cfg["context_messages"]))
+        # 多取一些再过滤，免得日志把真正的上下文挤掉
+        ctx = [m for m in self.memory.tail(target, n_ctx * 2) if not looks_like_log(m["text"])][-n_ctx:]
+        if not ctx:
+            ctx = msgs[-n_ctx:]
         if media:  # 媒体消息屏幕上读不到，补进上下文，不然模型看到的最后一条还是我发的
             ctx = ctx + new_in
-        draft = llm.generate(cfg["llm"], target, is_group, ctx, cfg["my_nickname"], must_reply=force)
+        draft = llm.generate(cfg["llm"], target, is_group, ctx, cfg["my_nickname"],
+                             must_reply=force, new_messages=new_in)
         if not draft and force:
             draft = random.choice(["嗯嗯", "收到", "好嘞", "行"])  # 模型还是不想回，就补一句，保证我的消息是最新的
         if is_group and cfg.get("reply_mention_back", True) and draft:
             who = next((clean_sender(m.get("sender")) for m in reversed(new_in) if clean_sender(m.get("sender"))), None)
             if who and not draft.startswith("@" + who):  # 群里回谁就 @ 谁，免得看不出在跟谁说话
                 draft = f"@{who} {draft}"
+        t_gen = time.time()
         incoming = "\n".join(m["text"] for m in new_in)
         if not draft:
             log.info("[%s] 模型判断不需要回复", target)
@@ -412,12 +446,15 @@ class Bot:
         if not self.store.get()["enabled"]:  # 等待期间被关掉了
             log.info("[%s] 已暂停，不发送", target)
             return
+        t_send = time.time()
         if cfg.get("quote_reply", True) and not media:
             src = next((m["text"] for m in reversed(new_in) if not m["me"] and m["text"].strip()), "")
-            if src and self.ui.quote(src):
+            if src and self.ui.quote(src, snap):
                 log.debug("[%s] 已引用对方那条消息", target)
             elif src:
                 log.debug("[%s] 没引用成功，直接发", target)
+        log.debug("[%s] 耗时：打开+识别 %.1fs，生成 %.1fs，引用 %.1fs",
+                  target, t_read - t_start, t_gen - t_read, time.time() - t_send)
         self.ui.send(text)
         self.memory.add(target, text, me=True)  # 自己发的也记进上下文
         self.sent.append(time.time())

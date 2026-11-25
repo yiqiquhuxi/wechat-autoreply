@@ -114,6 +114,9 @@ def activate_wechat(timeout=3.0):
     """把微信切到最前面，并确认切换成功。失败返回 False。"""
     if wechat_pid() is None:
         return False
+    # 已经在前台就别再走一次 open -b，每次省 0.5~2 秒
+    if wechat_is_front() and wechat_window() is not None:
+        return True
     _open_bundle(WECHAT_BUNDLE_ID)
     end = time.time() + timeout
     while time.time() < end:
@@ -158,15 +161,27 @@ def full_screenshot():
     return img, img.width / disp.size.width
 
 
-def ocr(img: Image.Image, scale: float):
-    """用系统 Vision 框架识别中英文，返回 OcrLine 列表（坐标单位 pt）。"""
+def screen_rect_around(x, y, w, h):
+    """以屏幕坐标 (x, y) 为中心、尽量不超出主屏的一块区域，用于局部截图。"""
+    disp = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
+    dw, dh = float(disp.size.width), float(disp.size.height)
+    w, h = min(float(w), dw), min(float(h), dh)
+    rx = min(max(0.0, x - w / 2), dw - w)
+    ry = min(max(0.0, y - h / 2), dh - h)
+    return Rect(rx, ry, w, h)
+
+
+def ocr(img: Image.Image, scale: float, fast: bool = False):
+    """用系统 Vision 框架识别中英文，返回 OcrLine 列表（坐标单位 pt）。
+    fast=True 用快速模式，适合菜单、输入框这类小区域。"""
     fd, path = tempfile.mkstemp(suffix=".png")
     os.close(fd)
     try:
         img.save(path)
         handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(NSURL.fileURLWithPath_(path), None)
         req = Vision.VNRecognizeTextRequest.alloc().init()
-        req.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+        req.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelFast if fast
+                                 else Vision.VNRequestTextRecognitionLevelAccurate)
         req.setRecognitionLanguages_(["zh-Hans", "en-US"])
         req.setUsesLanguageCorrection_(False)
         handler.performRequests_error_([req], None)

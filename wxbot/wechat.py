@@ -282,7 +282,8 @@ def parse_chat(lines, lay: Layout):
         else:
             blocks.append({"side": side, "lines": [l], "bottom": l.y + l.h,
                            "sender": sender if side == "in" else None})
-            if side == "in":
+            if side == "me":
+                # 我方发言后，对方再说话时昵称行会重新出现；先清掉，免得出错人
                 sender = None
 
     messages = []
@@ -350,9 +351,10 @@ class WeChatUI:
                int(self.lay.win_w * scale) - 2, int(self.lay.input_top * scale))
         return hashlib.md5(img.crop(box).tobytes()).hexdigest()
 
-    def scroll_chat_to_bottom(self, max_tries=8):
-        """把聊天记录滚到最新一条。点开一个之前看过的会话时，微信可能停在老位置，
-        不滚到底会漏掉刚发来的消息。返回是否确认到底。"""
+    def scroll_chat_to_bottom(self, max_tries=4):
+        """把聊天记录滚到最新一条。每次滚一大段，等画面稳定后再判断：
+        这一滚如果画面没变，说明已经到底了。
+        原实现每轮死等 1.5 秒、最多 8 轮，一条回复光这里就要十几秒。"""
         h = self.chat_hash()
         for _ in range(max_tries):
             self._ensure_front()
@@ -362,18 +364,13 @@ class WeChatUI:
             for _ in range(20):
                 macos.scroll_px(-120)
                 time.sleep(0.01)
-            end = time.time() + 1.5
-            while True:
-                time.sleep(0.15)
-                h2 = self.chat_hash()
-                if h2 == h or time.time() > end:
-                    break
-                h = h2
-            if h2 == h and h2 == self.chat_hash():
+            h2 = self._wait_chat_stable()
+            if h2 == h:
                 return True
+            h = h2
         return False
 
-    def _wait_stable(self, timeout=1.5):
+    def _wait_stable(self, timeout=1.0):
         """等列表滚动动画停下来，返回停下后的画面指纹。"""
         h = self.list_hash()
         end = time.time() + timeout
@@ -384,6 +381,18 @@ class WeChatUI:
                 return h
             h = h2
         return h
+
+    def _wait_chat_stable(self, timeout=1.0):
+        """等聊天区画面连续两次采样一致，返回稳定后的指纹。"""
+        prev = None
+        end = time.time() + timeout
+        while time.time() < end:
+            cur = self.chat_hash()
+            if cur == prev:
+                return cur
+            prev = cur
+            time.sleep(0.1)
+        return prev
 
     def _scroll_px(self, px):
         self._ensure_front()
@@ -418,11 +427,12 @@ class WeChatUI:
         macos.click(x, y)
         time.sleep(self.settle)
 
-    def quote(self, text):
+    def quote(self, text, snap=None):
         """右键那条消息 → 点菜单里的「引用」，输入框上方会出现引用块。成功返回 True。
         找不到那条消息、或菜单没点中，就返回 False，调用方退回普通发送。
-        菜单是独立的弹出窗口，按微信主窗口截图看不到，只能整屏截。"""
-        snap = self.snapshot()
+        菜单是独立的弹出窗口，按微信主窗口截图看不到它，只截鼠标附近一小块做 OCR。
+        snap 可以传调用方刚截好的画面，省一次整窗截图+OCR。"""
+        snap = snap or self.snapshot()
         if snap is None:
             return False
         msgs = [m for m in parse_chat(snap[2], self.lay)["messages"] if not m["me"]]
@@ -436,24 +446,39 @@ class WeChatUI:
         sx, sy = self._abs(m.get("x", self.lay.chat_x + 140) + min(20, max(6, m.get("w", 40) / 2)),
                            m["y"] + 7)
         macos.right_click(sx, sy)
-        time.sleep(0.8)
-        img, scale = macos.full_screenshot()
-        item = next((l for l in macos.ocr(img, scale)
-                     if abs(l.x - sx) < 400 and abs(l.cy - sy) < 420
-                     and re.fullmatch(r"引用\s*", l.text.strip())), None)
+        time.sleep(0.6)
+        # 菜单就在鼠标附近，只截 900×900 的区域，比整屏 OCR 快好几倍
+        rect = macos.screen_rect_around(sx, sy, 900, 900)
+
+        def find(lines):
+            return next((l for l in lines
+                         if "引用" in l.text.strip()
+                         and abs(rect.x + l.cx - sx) < 420 and abs(rect.y + l.cy - sy) < 440), None)
+
+        img, scale = macos.screenshot(rect)
+        lines = macos.ocr(img, scale, fast=True)
+        item = find(lines)
+        if item is None:  # 快速模式偶尔认不出，用精确模式兜底
+            lines = macos.ocr(img, scale)
+            item = find(lines)
+        if item is None:  # 菜单可能还没弹出来，再等一下重截一次
+            time.sleep(0.25)
+            img, scale = macos.screenshot(rect)
+            lines = macos.ocr(img, scale, fast=True)
+            item = find(lines)
         if item is None:
-            log.debug("右键菜单里没找到「引用」")
+            log.debug("右键菜单里没找到「引用」，OCR 到：%s", [l.text for l in lines][:15])
             macos.key(macos.KEY_ESC)
             return False
-        macos.click(item.cx, item.cy)
-        time.sleep(0.6)
-        snap = self.snapshot()
-        if snap is None:
-            return False
-        # 引用块在输入框上方，形如「发送者：消息开头」。OCR 对 @、0/o 之类容易认错，用片段重合判断
-        box = [l for l in snap[2] if l.y > self.lay.input_top - 60 and l.x > self.lay.chat_x]
+        macos.click(rect.x + item.cx, rect.y + item.cy)
+        time.sleep(0.25)
+        # 引用块在输入框上方，只截这一条做 OCR，别再把整个窗口识别一遍
+        img, scale = macos.screenshot(self.win)  # 按窗口截，被别的窗口挡住也不影响
+        crop = img.crop((int(self.lay.chat_x * scale), int((self.lay.input_top - 110) * scale),
+                         int((self.lay.chat_x + self.lay.chat_w) * scale), int(self.lay.input_top * scale)))
+        # 形如「发送者：消息开头」。OCR 对 @、0/o 之类容易认错，用片段重合判断
         want = re.sub(r"\s", "", text or "")
-        for l in box:
+        for l in macos.ocr(crop, scale, fast=True):
             t = re.sub(r"\s", "", l.text)
             if "：" in t and sum(1 for i in range(len(want) - 2) if want[i:i + 3] in t) >= 2:
                 return True
