@@ -169,6 +169,7 @@ class Bot:
         self.pending = {}  # 点开过、但这次没处理完的会话（红点已经没了），下轮按名字回来找
         self.memory = ChatMemory(persist=not dry_run)  # 每个会话的聊天记忆，屏幕外的上下文靠它
         self.force_checked = {}  # 必回群上次检查的时间
+        self._scan_bottom = False  # 上一次 scan_unread 是否已经翻到列表底部
         macos.should_stop = lambda: self.stop_event.is_set() or (not self.dry and not self.store.get()["enabled"])
         try:
             with open(STATE_PATH, encoding="utf-8") as f:
@@ -193,6 +194,15 @@ class Bot:
 
     def _any_due(self, cfg):
         return any(self._check_due(cfg, t) for t in self._all_names(cfg) + self._always_names(cfg))
+
+    def _should_scan_more(self, cfg, total):
+        """当前屏处理完后，还值不值得滚列表继续找。
+        没未读、没可处理的待办、也没有到点会话时，直接结束本轮，省掉一次全列表扫描。"""
+        if total is None or total > 0:
+            return True
+        if any(self.allow(cfg, t)[0] for t in self.pending):
+            return True
+        return self._any_due(cfg)
 
     def classify(self, cfg, name):
         """私聊白名单、群白名单、必回群是三个互不相干的名单，各自匹配。
@@ -224,6 +234,14 @@ class Bot:
         if last and now - last < lim["per_chat_cooldown_seconds"]:
             return False, f"{int(lim['per_chat_cooldown_seconds'] - (now - last))} 秒内刚回过这个会话"
         return True, ""
+
+    def _rate_limited(self, cfg):
+        """本小时回复数到上限时，连列表都不用扫，更不要点开会话标已读。"""
+        lim = cfg["limits"]
+        now = time.time()
+        while self.sent and now - self.sent[0] > 3600:
+            self.sent.popleft()
+        return len(self.sent) >= lim["max_replies_per_hour"]
 
     def _defer(self, target, row, why):
         """这次先不回，但会话已经点开、红点没了；记下来下轮再处理。"""
@@ -276,9 +294,90 @@ class Bot:
                     return (r, t), len(hits)
         return None, len(hits)
 
+    def _find_row(self, snap, target, th):
+        """在这一屏的会话列表里按名字找一行；找不到返回 None。"""
+        img, scale, lines = snap
+        rows = parse_session_rows(lines, self.ui.lay, find_avatars(img, scale, self.ui.lay))
+        for r in rows:
+            if match_name(r["name"], [target], th):
+                return r
+        return None
+
+    def _screen_tasks(self, cfg, snap, max_tasks):
+        """只看当前这一屏，收集能马上处理的会话，带着行坐标返回。
+        先处理眼前的任务，当前屏没有了才翻页——避免为了凑批次先扫全列表，把第一条回复拖慢。"""
+        img, scale, lines = snap
+        rows = parse_session_rows(lines, self.ui.lay, find_avatars(img, scale, self.ui.lay))
+        hits = attach_badges(rows, find_badges(img, scale, self.ui.lay))
+        th = cfg["match_threshold"]
+        now = time.time()
+        tasks, seen = [], set()
+
+        # 1) 红点未读
+        for h in hits:
+            target = self.whitelisted(cfg, h["name"])
+            log.debug("当前屏 未读: %s -> %s", h["name"], target or "不在白名单")
+            if not target or target in seen or len(tasks) >= max_tasks:
+                continue
+            ok, why = self.allow(cfg, target)
+            if not ok:
+                # 冷却/限流中先别点开：点开会把消息标已读，还白占一个本轮名额
+                old = self.pending.get(target, {})
+                self.pending[target] = {
+                    "since": old.get("since", now),
+                    "mentioned": old.get("mentioned") or ("有人@我" in (h.get("preview") or "")),
+                }
+                seen.add(target)
+                log.debug("当前屏 冷却中先不打开: %s（%s）", target, why)
+                continue
+            tasks.append((target, h, "未读"))
+            seen.add(target)
+            self.force_checked[target] = now
+
+        # 2) 之前点开过、但没处理完的（红点已经没了），当前屏看得到就排上
+        for t, info in list(self.pending.items()):
+            if now - info["since"] > 1800:  # 半小时还没处理掉就放弃
+                self.pending.pop(t, None)
+                continue
+            if t in seen or len(tasks) >= max_tasks:
+                continue
+            ok, _ = self.allow(cfg, t)
+            if not ok:
+                continue
+            row = next((r for r in rows if match_name(r["name"], [t], th)), None)
+            if row:
+                tasks.append((t, row, "待处理"))
+                seen.add(t)
+                self.force_checked[t] = now
+
+        # 3) 没有红点、但到点该看的（免打扰群根本没有红点）
+        cands = []
+        for r in rows:
+            t = self.whitelisted(cfg, r["name"])
+            if not t or t in seen or not self._check_due(cfg, t):
+                continue
+            ok, why = self.allow(cfg, t)
+            if not ok:
+                # 冷却/限流中先不打开，免得白标已读；force_checked 不动，等能回的时候再看
+                seen.add(t)
+                log.debug("当前屏 冷却中先不打开: %s（%s）", t, why)
+                continue
+            cands.append((self.force_checked.get(t, 0), t, r))
+        for _, t, r in sorted(cands, key=lambda c: (c[0], c[1])):
+            if len(tasks) >= max_tasks:
+                break
+            self.force_checked[t] = time.time()
+            tasks.append((t, r, "主动检查"))
+            seen.add(t)
+
+        rank = {"未读": 0, "待处理": 1, "主动检查": 2}
+        tasks.sort(key=lambda x: rank[x[2]])
+        return tasks, seen
+
     def scan_unread(self, cfg, expected_total):
         """找第一个命中白名单、带红点的会话，返回 (row, 白名单名)；找不到返回 None。
         先看当前这一屏；没有再滚到顶，然后每次往下翻 3/4 屏，直到到底或翻够页数。"""
+        self._scan_bottom = False
         snap = self.ui.snapshot()
         if snap is None:
             log.warning("找不到微信主窗口（最小化了，或在别的桌面？），这轮跳过")
@@ -301,6 +400,7 @@ class Bot:
                 break
             if not self.ui.scroll_list_page():
                 log.debug("列表到底了")
+                self._scan_bottom = True
                 break
         return None
 
@@ -354,6 +454,7 @@ class Bot:
             media = media_kind((row or {}).get("preview")) or media_kind(msgs[-1]["text"] if msgs else "")
             if not media:
                 log.debug("[%s] 最新一条是我发的，跳过（预览=%r）", target, (row or {}).get("preview"))
+                self.pending.pop(target, None)  # 已经没什么要回的了，别再占着待处理名额
                 return
             log.info("[%s] 对方发的是%s（屏幕上没字，按媒体消息处理）", target, media)
             new_in = [{"text": f"［{media}］", "me": False, "sender": None}]
@@ -362,6 +463,7 @@ class Bot:
             key = hashlib.sha1(f"{key}:{row['time']}".encode()).hexdigest()  # 同一条媒体消息反复扫到要能认出来
         if self.state.get(target, {}).get("last_key") == key:
             log.info("[%s] 这些消息已处理过，跳过", target)
+            self.pending.pop(target, None)
             return
 
         always = self._always_names(cfg)
@@ -484,8 +586,11 @@ class Bot:
         if not self.dry and macos.user_idle_seconds() < cfg["idle_seconds_required"]:
             self.status.set(f"运行中 · 有 {total} 条未读，等你离开电脑")
             return
+        if not self.dry and self._rate_limited(cfg):
+            self.status.set("运行中 · 本小时回复已达上限")
+            return
 
-        self.status.set(f"运行中 · 处理 {total} 条未读")
+        self.status.set(f"运行中 · 处理 {total if total is not None else '?'} 条未读")
         front = macos.frontmost_app()
         mouse = macos.mouse_pos()
         interrupted = False
@@ -506,24 +611,89 @@ class Bot:
                     if target:
                         self.handle(cfg, target)
                 return
-            for _ in range(cfg["max_chats_per_round"]):
-                if not macos.activate_wechat():  # 每个会话都是「切过去 → 干完 → 立刻还回去」，占屏时间尽量短
+            max_tasks = max(1, int(cfg["max_chats_per_round"]))
+            done = 0
+            tried = set()
+
+            # 先处理当前屏：只扫一次，能看到的任务立刻连续处理。
+            # 这一步不做任何翻页，所以第一条回复不会被全列表扫描拖慢。
+            snap = self.ui.snapshot()
+            screen_tasks, screen_seen = (
+                self._screen_tasks(cfg, snap, max_tasks) if snap else ([], set()))
+            if screen_tasks:
+                log.info("当前屏一次找到 %d 个待处理会话：%s", len(screen_tasks),
+                         "、".join(f"{t}（{why}）" for t, _, why in screen_tasks))
+                for i, (target, row, _why) in enumerate(screen_tasks):
+                    if not self.store.get()["enabled"] or self._rate_limited(cfg):
+                        break
+                    if i > 0:
+                        # 发完上一条后会话会跳到列表顶部，旧坐标会点错人；
+                        # 只在当前屏按名字重新找，找不到就留到下一轮，绝不为它翻列表。
+                        time.sleep(0.1)
+                        if not macos.activate_wechat():
+                            break
+                        snap2 = self.ui.snapshot()
+                        row = self._find_row(snap2, target, cfg["match_threshold"]) if snap2 else None
+                        if row is None:
+                            log.debug("当前屏找不到「%s」了，留到下一轮", target)
+                            continue
+                    try:
+                        self.handle(cfg, target, row)
+                        done += 1
+                        tried.add(target)
+                    except macos.UserBusy as e:
+                        self._defer(target, row, str(e))
+                        raise
+                    except Exception as e:
+                        self._defer(target, row, f"出错：{e}")
+                        raise
+
+            # 当前屏名额被占满时，给「没扫到、但已经到点」的会话额外留一个补查名额。
+            # 否则当前屏的必回群每轮都占满 5 个，列表下面的胡俊峰永远轮不到。
+            all_names = self._all_names(cfg) + self._always_names(cfg)
+            unseen_due = [t for t in all_names
+                          if t not in screen_seen and t not in tried
+                          and self._check_due(cfg, t) and self.allow(cfg, t)[0]]
+            extra = bool(unseen_due) and done >= max_tasks
+            if extra:
+                log.info("当前屏名额已满，额外补查一个没扫到的到点会话：%s", "、".join(unseen_due))
+
+            # 当前屏处理完还没到本轮上限，再按原来的方式滚到顶往下翻。
+            # 眼前的任务已经先回完了，这里只影响下面会话的发现速度。
+            while done < max_tasks or extra:
+                extra = False  # 只额外补一个，别把一轮拖太长
+                if not self.store.get()["enabled"] or self._rate_limited(cfg):
                     break
-                time.sleep(0.2)
-                macos.begin_guard()
-                found = self.scan_unread(cfg, total)
+                cur_total = macos.dock_badge()
+                if not self._should_scan_more(cfg, cur_total):
+                    break
+                if not macos.activate_wechat():
+                    break
+                time.sleep(0.15)
+                found = self.scan_unread(cfg, cur_total)
                 if not found:
+                    if self._scan_bottom:
+                        # 翻到底都没有，说明这些会话不在列表里（归档/改名/退群），
+                        # 先标记成已检查，免得每一轮都翻到底找它们。
+                        now = time.time()
+                        for t in all_names:
+                            if t not in screen_seen and self._check_due(cfg, t):
+                                self.force_checked[t] = now
                     break
                 row, target = found
+                if target in tried:
+                    log.debug("「%s」本轮已经试过，先跳过", target)
+                    break
                 try:
                     self.handle(cfg, target, row)
+                    done += 1
+                    tried.add(target)
                 except macos.UserBusy as e:
                     self._defer(target, row, str(e))
                     raise
                 except Exception as e:
                     self._defer(target, row, f"出错：{e}")
                     raise
-                self._restore(front, mouse)
         except macos.UserBusy as e:
             interrupted = True
             log.info("停止本轮操作：%s", e)

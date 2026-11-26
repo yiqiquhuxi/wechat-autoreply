@@ -50,6 +50,7 @@ def _clean(patch, current):
         "quote_reply": bool(patch.get("quote_reply", True)),
         "always_reply": names(patch.get("always_reply", c.get("always_reply", []))),
         "poll_seconds": max(5, num(patch.get("poll_seconds"), c["poll_seconds"])),
+        "max_chats_per_round": max(1, min(20, num(patch.get("max_chats_per_round"), c.get("max_chats_per_round", 5)))),
         "idle_seconds_required": max(0, num(patch.get("idle_seconds_required"), c["idle_seconds_required"])),
         "quiet_hours": patch.get("quiet_hours") if isinstance(patch.get("quiet_hours"), list) else c["quiet_hours"],
         "confirm_timeout_seconds": max(10, num(patch.get("confirm_timeout_seconds"), c["confirm_timeout_seconds"])),

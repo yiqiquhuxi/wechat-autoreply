@@ -282,7 +282,8 @@
             <button data-v="auto">全自动</button>
         </div>
         <div class="hint" style="margin-top:10px">微信只接受真实的前台鼠标和键盘事件（后台投递的点击/滚动它不响应），所以要回消息时
-            微信会短暂切到前台、鼠标会跳一下。程序只在你不碰电脑时才动手，处理完一个会话立刻把前台窗口和鼠标位置还回去。
+            微信会短暂切到前台、鼠标会跳一下。程序只在你不碰电脑时才动手；每轮先把当前屏能看到的待处理会话连续回复，
+            再按需往下翻，最后把前台窗口和鼠标位置还回去。
         </div>
         <div class="warn hidden" id="autoWarn">全自动会直接发出去，被风控的概率更高。建议先用半自动跑几天，确认回复质量再切换。</div>
     </section>
@@ -334,6 +335,10 @@
                 <div class="row"><input id="delay_min" min="0" type="number"> <span>~</span> <input id="delay_max" min="0" type="number"></div>
             </div>
             <div><label>检查未读间隔（秒）</label><input id="poll" min="5" type="number"></div>
+            <div>
+                <label>每轮最多处理（个会话）</label><input id="max_chats" max="20" min="1" type="number">
+                <div class="hint">当前屏排满了也会额外补查一个没扫到的到点会话，列表下面的人不会一直轮不到；调大能更快清积压，但微信在前台的时间也会变长</div>
+            </div>
             <div><label>你离开电脑多久后才动手（秒）</label><input id="idle" min="0" type="number"></div>
             <div><label>确认弹窗超时（秒）</label><input id="confirm_timeout" min="10" type="number"></div>
             <div>
@@ -456,6 +461,7 @@
         $("delay_min").value = c.limits.reply_delay_seconds[0];
         $("delay_max").value = c.limits.reply_delay_seconds[1];
         $("poll").value = c.poll_seconds;
+        $("max_chats").value = c.max_chats_per_round || 5;
         $("idle").value = c.idle_seconds_required;
         $("confirm_timeout").value = c.confirm_timeout_seconds;
         const q = c.quiet_hours || [];
@@ -492,6 +498,7 @@
             quote_reply: $("quote_reply").checked,
             always_reply: $("wl_always").value,
             poll_seconds: $("poll").value, idle_seconds_required: $("idle").value,
+            max_chats_per_round: $("max_chats").value,
             confirm_timeout_seconds: $("confirm_timeout").value,
             quiet_hours: $("quiet_on").checked ? [$("quiet_start").value, $("quiet_end").value] : [],
             limits: {
